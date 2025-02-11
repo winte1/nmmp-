@@ -1,17 +1,17 @@
 package com.nmmedit.apkprotect.dex2c.converter;
 
+import com.android.tools.smali.dexlib2.AccessFlags;
+import com.android.tools.smali.dexlib2.dexbacked.DexBackedDexFile;
+import com.android.tools.smali.dexlib2.iface.*;
+import com.android.tools.smali.dexlib2.iface.instruction.Instruction;
+import com.android.tools.smali.dexlib2.iface.instruction.ReferenceInstruction;
+import com.android.tools.smali.dexlib2.iface.reference.FieldReference;
+import com.android.tools.smali.dexlib2.iface.reference.MethodReference;
+import com.android.tools.smali.dexlib2.iface.reference.StringReference;
+import com.android.tools.smali.dexlib2.iface.reference.TypeReference;
+import com.android.tools.smali.dexlib2.util.MethodUtil;
 import com.google.common.collect.Sets;
 import com.nmmedit.apkprotect.util.ModifiedUtf8;
-import org.jf.dexlib2.AccessFlags;
-import org.jf.dexlib2.dexbacked.DexBackedDexFile;
-import org.jf.dexlib2.iface.*;
-import org.jf.dexlib2.iface.instruction.Instruction;
-import org.jf.dexlib2.iface.instruction.ReferenceInstruction;
-import org.jf.dexlib2.iface.reference.FieldReference;
-import org.jf.dexlib2.iface.reference.MethodReference;
-import org.jf.dexlib2.iface.reference.StringReference;
-import org.jf.dexlib2.iface.reference.TypeReference;
-import org.jf.dexlib2.util.MethodUtil;
 
 import javax.annotation.Nonnull;
 import java.io.UTFDataFormatException;
@@ -187,6 +187,7 @@ public class References {
                 stringPoolIndexMap.put(ref, stringPool.size() - 1);
             }
         }
+        makeConstStringPool();
     }
 
     //解析所有引用指令,得到各种引用信息或者检测不支持指令
@@ -331,11 +332,34 @@ public class References {
         return stringPool;
     }
 
-    public List<String> getConstantStringPool() {
-        final ArrayList<String> constStringPool = new ArrayList<>(constantStrings.size());
+
+    //用于重写const-string指令索引
+    final ArrayList<String> constStringPool = new ArrayList<>();
+    private final HashMap<String, Integer> constStringPoolIndexMap = new HashMap<>();
+
+
+    private void makeConstStringPool() {
+        //常量字符串
         constStringPool.addAll(constantStrings);
+        Collections.sort(constStringPool);
+        for (int i = 0; i < constStringPool.size(); i++) {
+            constStringPoolIndexMap.put(constStringPool.get(i), i);
+        }
+    }
+
+
+    public List<String> getConstantStringPool() {
         return constStringPool;
     }
+
+    public int getConstStringItemIndex(String constString) {
+        final Integer integer = constStringPoolIndexMap.get(constString);
+        if (integer == null) {
+            throw new RuntimeException("unknown constString ref: " + constString);
+        }
+        return integer;
+    }
+
 
     private final ArrayList<String> typePool = new ArrayList<>();
     private final HashMap<String, Integer> typePoolIndexMap = new HashMap<>();

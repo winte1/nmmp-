@@ -1,5 +1,12 @@
 package com.nmmedit.apkprotect;
 
+import com.android.tools.smali.dexlib2.Opcodes;
+import com.android.tools.smali.dexlib2.dexbacked.DexBackedClassDef;
+import com.android.tools.smali.dexlib2.dexbacked.DexBackedDexFile;
+import com.android.tools.smali.dexlib2.iface.ClassDef;
+import com.android.tools.smali.dexlib2.iface.DexFile;
+import com.android.tools.smali.dexlib2.writer.io.FileDataStore;
+import com.android.tools.smali.dexlib2.writer.pool.DexPool;
 import com.android.zipflinger.*;
 import com.nmmedit.apkprotect.andres.AxmlEdit;
 import com.nmmedit.apkprotect.data.Prefs;
@@ -10,27 +17,16 @@ import com.nmmedit.apkprotect.dex2c.converter.ClassAnalyzer;
 import com.nmmedit.apkprotect.dex2c.converter.instructionrewriter.InstructionRewriter;
 import com.nmmedit.apkprotect.dex2c.converter.structs.RegisterNativesUtilClassDef;
 import com.nmmedit.apkprotect.dex2c.filters.ClassAndMethodFilter;
-import com.nmmedit.apkprotect.sign.ApkVerifyCodeGenerator;
 import com.nmmedit.apkprotect.util.ApkUtils;
+import com.nmmedit.apkprotect.util.CmakeUtils;
 import com.nmmedit.apkprotect.util.FileUtils;
-import org.jf.dexlib2.Opcodes;
-import org.jf.dexlib2.dexbacked.DexBackedClassDef;
-import org.jf.dexlib2.dexbacked.DexBackedDexFile;
-import org.jf.dexlib2.iface.ClassDef;
-import org.jf.dexlib2.iface.DexFile;
-import org.jf.dexlib2.writer.io.FileDataStore;
-import org.jf.dexlib2.writer.pool.DexPool;
 
 import javax.annotation.Nonnull;
 import java.io.*;
-import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
-import java.util.stream.Collectors;
 import java.util.zip.Deflater;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipFile;
 
 public class ApkProtect {
 
@@ -38,14 +34,12 @@ public class ApkProtect {
     public static final String ANDROID_APP_APPLICATION = "android.app.Application";
     private final ApkFolders apkFolders;
     private final InstructionRewriter instructionRewriter;
-    private final ApkVerifyCodeGenerator apkVerifyCodeGenerator;
     private final ClassAndMethodFilter filter;
 
     private final ClassAnalyzer classAnalyzer;
 
     private ApkProtect(ApkFolders apkFolders,
                        InstructionRewriter instructionRewriter,
-                       ApkVerifyCodeGenerator apkVerifyCodeGenerator,
                        ClassAndMethodFilter filter,
                        ClassAnalyzer classAnalyzer
     ) {
@@ -53,7 +47,6 @@ public class ApkProtect {
 
         this.instructionRewriter = instructionRewriter;
 
-        this.apkVerifyCodeGenerator = apkVerifyCodeGenerator;
         this.filter = filter;
         this.classAnalyzer = classAnalyzer;
 
@@ -73,7 +66,7 @@ public class ApkProtect {
             final String packageName = AxmlEdit.getPackageName(manifestBytes);
 
             //生成一些需要改变的c代码(随机opcode后的头文件及apk验证代码等)
-            generateCSources(packageName);
+            CmakeUtils.generateCSources(apkFolders.getDex2cSrcDir(), instructionRewriter);
 
             //解压得到所有classesN.dex
             List<File> files = getClassesFiles(apkFile, zipExtractDir);
@@ -122,7 +115,9 @@ public class ApkProtect {
                     apkFolders.getTempDexDir());
 
 
-            final Map<String, List<File>> nativeLibs = generateNativeLibs(apkFolders);
+            final List<String> abis = getAbis(apkFile);
+
+            final Map<String, Map<File, File>> nativeLibs = BuildNativeLib.generateNativeLibs(apkFolders.getOutRootDir(), abis);
 
             File mainDex = outDexFiles.get(0);
 
@@ -143,7 +138,7 @@ public class ApkProtect {
             ) {
                 final ZipMap zipMap = ZipMap.from(apkFile.toPath());
                 //添加原apk不被修改的数据
-                zipCopy(zipMap,zipArchive,ZipSource.COMPRESSION_NO_CHANGE);
+                zipCopy(zipMap, zipArchive, ZipSource.COMPRESSION_NO_CHANGE);
 
                 //add AndroidManifest.xml
                 final Source androidManifestSource = Sources.from(new ByteArrayInputStream(manifestBytes), ANDROID_MANIFEST_XML, Deflater.DEFAULT_COMPRESSION);
@@ -158,9 +153,9 @@ public class ApkProtect {
                 }
 
                 //add native libs
-                for (Map.Entry<String, List<File>> entry : nativeLibs.entrySet()) {
+                for (Map.Entry<String, Map<File, File>> entry : nativeLibs.entrySet()) {
                     final String abi = entry.getKey();
-                    for (File file : entry.getValue()) {
+                    for (File file : entry.getValue().values()) {
                         //最小sdk如果不小于23,且AndroidManifest.xml里面没有android:extractNativeLibs="true", so不能压缩,且需要页对齐
 //                        final Source source = Sources.from(file, "lib/" + abi + "/" + file.getName(), Deflater.NO_COMPRESSION);
 //                        source.align(4*1024);
@@ -174,66 +169,20 @@ public class ApkProtect {
             }
         } finally {
             //删除解压缓存目录
-            deleteFile(zipExtractDir);
+            FileUtils.deleteFile(zipExtractDir);
         }
-    }
-
-    private static Map<String, List<File>> generateNativeLibs(ApkFolders apkFolders) throws IOException {
-        String cmakePath = System.getenv("CMAKE_PATH");
-        if (isEmpty(cmakePath)) {
-            System.err.println("No CMAKE_PATH");
-            cmakePath = Prefs.cmakePath();
-        }
-        String sdkHome = System.getenv("ANDROID_SDK_HOME");
-        if (isEmpty(sdkHome)) {
-            sdkHome = Prefs.sdkPath();
-            System.err.println("No ANDROID_SDK_HOME. Default is " + sdkHome);
-        }
-        String ndkHome = System.getenv("ANDROID_NDK_HOME");
-        if (isEmpty(ndkHome)) {
-            ndkHome = Prefs.ndkPath();
-            System.err.println("No ANDROID_NDK_HOME. Default is " + ndkHome);
-        }
-
-        final File outRootDir = apkFolders.getOutRootDir();
-        final File apkFile = apkFolders.getInApk();
-
-        final Map<String, List<File>> allLibs = new HashMap<>();
-
-        final List<String> abis = getAbis(apkFile);
-        for (String abi : abis) {
-            final BuildNativeLib.CMakeOptions cmakeOptions = new BuildNativeLib.CMakeOptions(cmakePath,
-                    sdkHome,
-                    ndkHome, 21,
-                    outRootDir.getAbsolutePath(),
-                    BuildNativeLib.CMakeOptions.BuildType.RELEASE,
-                    abi);
-
-            //删除上次创建的目录
-            deleteFile(new File(cmakeOptions.getBuildPath()));
-
-            final List<File> files = BuildNativeLib.build(cmakeOptions);
-            allLibs.put(abi, files);
-        }
-        return allLibs;
-
-    }
-
-    private static boolean isEmpty(String cmakePath) {
-        return cmakePath == null || "".equals(cmakePath);
     }
 
     //根据apk里文件得到abi，如果没有本地库则返回所有
     private static List<String> getAbis(File apk) throws IOException {
         final Pattern pattern = Pattern.compile("lib/(.*)/.*\\.so");
-        final ZipFile zipFile = new ZipFile(apk);
-        final Enumeration<? extends ZipEntry> entries = zipFile.entries();
         Set<String> abis = new HashSet<>();
-        while (entries.hasMoreElements()) {
-            final ZipEntry entry = entries.nextElement();
-            final Matcher matcher = pattern.matcher(entry.getName());
-            if (matcher.matches()) {
-                abis.add(matcher.group(1));
+        try (ZipArchive zipArchive = new ZipArchive(apk.toPath())) {
+            for (String entry : zipArchive.listEntries()) {
+                final Matcher matcher = pattern.matcher(entry);
+                if (matcher.matches()) {
+                    abis.add(matcher.group(1));
+                }
             }
         }
         //不支持armeabi，可能还要删除mips相关
@@ -260,36 +209,6 @@ public class ApkProtect {
         return new ArrayList<>(abis);
     }
 
-    private void generateCSources(String packageName) throws IOException {
-        final File vmsrcFile = new File(FileUtils.getHomePath(), "tools/vmsrc.zip");
-        //每次强制从资源里复制出来
-//        if (!vmsrcFile.exists()) {
-        vmsrcFile.getParentFile().mkdirs();
-        //copy vmsrc.zip to external directory
-        try (
-                InputStream inputStream = ApkProtect.class.getResourceAsStream("/vmsrc.zip");
-                final FileOutputStream outputStream = new FileOutputStream(vmsrcFile);
-        ) {
-            FileUtils.copyStream(inputStream, outputStream);
-        }
-//        }
-        final List<File> cSources = ApkUtils.extractFiles(vmsrcFile, ".*", apkFolders.getDex2cSrcDir());
-
-        //处理指令及apk验证,生成新的c文件
-        for (File source : cSources) {
-            if (source.getName().endsWith("DexOpcodes.h")) {
-                //根据指令重写规则重新生成DexOpcodes.h文件
-                writeOpcodeHeaderFile(source, instructionRewriter);
-            } else if (source.getName().endsWith("apk_verifier.c")) {
-                //根据公钥数据生成签名验证代码
-                writeApkVerifierFile(packageName, source, apkVerifyCodeGenerator);
-            } else if (source.getName().equals("CMakeLists.txt")) {
-                //处理cmake里配置的本地库名
-                writeCmakeFile(source, BuildNativeLib.NMMP_NAME);
-            }
-        }
-    }
-
     private static List<File> getClassesFiles(File apkFile, File zipExtractDir) throws IOException {
         List<File> files = ApkUtils.extractFiles(apkFile, "classes(\\d+)*\\.dex", zipExtractDir);
         //根据classes索引大小排序
@@ -310,71 +229,6 @@ public class ApkProtect {
             return n - n2;
         });
         return files;
-    }
-
-    //根据指令重写规则,重新生成新的opcode
-    private static void writeOpcodeHeaderFile(File source, InstructionRewriter instructionRewriter) throws IOException {
-        final BufferedReader bufferedReader = new BufferedReader(new InputStreamReader(
-                new FileInputStream(source), StandardCharsets.UTF_8));
-
-        final String collect = bufferedReader.lines().collect(Collectors.joining("\n"));
-        final Pattern opcodePattern = Pattern.compile(
-                "enum Opcode \\{.*?};",
-                Pattern.MULTILINE | Pattern.DOTALL);
-        final StringWriter opcodeContent = new StringWriter();
-        final StringWriter gotoTableContent = new StringWriter();
-        instructionRewriter.generateConfig(opcodeContent, gotoTableContent);
-        String headerContent = opcodePattern
-                .matcher(collect)
-                .replaceAll(String.format("enum Opcode {\n%s};\n", opcodeContent.toString()));
-
-        //根据opcode生成goto表
-        final Pattern patternGotoTable = Pattern.compile(
-                "_name\\[kNumPackedOpcodes\\] = \\{.*?};",
-                Pattern.MULTILINE | Pattern.DOTALL);
-        headerContent = patternGotoTable
-                .matcher(headerContent)
-                .replaceAll(String.format("_name[kNumPackedOpcodes] = {        \\\\\n%s};\n", gotoTableContent));
-
-        try (FileWriter fileWriter = new FileWriter(source)) {
-            fileWriter.write(headerContent);
-        }
-    }
-
-    //读取证书信息,并把公钥写入签名验证文件里,运行时对apk进行签名校验
-    private static void writeApkVerifierFile(String packageName, File source, ApkVerifyCodeGenerator apkVerifyCodeGenerator) throws IOException {
-        if (apkVerifyCodeGenerator == null) {
-            return;
-        }
-        final BufferedReader bufferedReader = new BufferedReader(new InputStreamReader(
-                new FileInputStream(source), StandardCharsets.UTF_8));
-
-        final String lines = bufferedReader.lines().collect(Collectors.joining("\n"));
-        String dataPlaceHolder = "#define publicKeyPlaceHolder";
-
-        String content = lines.replaceAll(dataPlaceHolder, dataPlaceHolder + apkVerifyCodeGenerator.generate());
-        content = content.replaceAll("(#define PACKAGE_NAME) .*\n", "$1 \"" + packageName + "\"\n");
-
-        try (FileWriter fileWriter = new FileWriter(source)) {
-            fileWriter.write(content);
-        }
-    }
-
-
-    private static void writeCmakeFile(File cmakeTemp, String libName) throws IOException {
-        final BufferedReader bufferedReader = new BufferedReader(new InputStreamReader(
-                new FileInputStream(cmakeTemp), StandardCharsets.UTF_8));
-
-        String lines = bufferedReader.lines().collect(Collectors.joining("\n"));
-        //定位cmake里的语句,防止替换错误
-        String libNameFormat = "set\\(LIBNAME_PLACEHOLDER \"%s\"\\)";
-
-        //替换原本libname
-        lines = lines.replaceAll(String.format(libNameFormat, "nmmp"), String.format(libNameFormat, libName));
-
-        try (FileWriter fileWriter = new FileWriter(cmakeTemp)) {
-            fileWriter.write(lines);
-        }
     }
 
 
@@ -439,10 +293,10 @@ public class ApkProtect {
      * @return
      * @throws IOException
      */
-    private static ArrayList<File> injectInstructionAndWriteToFile(GlobalDexConfig globalConfig,
-                                                                   Set<String> mainClassSet,
-                                                                   int maxPoolSize,
-                                                                   File dexOutDir
+    public static ArrayList<File> injectInstructionAndWriteToFile(GlobalDexConfig globalConfig,
+                                                                  Set<String> mainClassSet,
+                                                                  int maxPoolSize,
+                                                                  File dexOutDir
     ) throws IOException {
 
         final ArrayList<File> dexFiles = new ArrayList<>();
@@ -514,9 +368,9 @@ public class ApkProtect {
 
     //在主dex里增加NativeUtil类
     //返回处理后的dex文件
-    private static File internNativeUtilClassDef(@Nonnull File mainDex,
-                                                 @Nonnull GlobalDexConfig globalConfig,
-                                                 @Nonnull String libName) throws IOException {
+    public static File internNativeUtilClassDef(@Nonnull File mainDex,
+                                                @Nonnull GlobalDexConfig globalConfig,
+                                                @Nonnull String libName) throws IOException {
 
 
         DexFile mainDexFile = DexBackedDexFile.fromInputStream(
@@ -569,21 +423,6 @@ public class ApkProtect {
         outArchive.add(zipSource);
     }
 
-    //递归删除目录
-    private static void deleteFile(File file) {
-        if (file == null) {
-            return;
-        }
-        if (file.isDirectory()) {
-            final File[] files = file.listFiles();
-            if (files != null) {
-                for (File child : files) {
-                    deleteFile(child);
-                }
-            }
-        }
-        file.delete();
-    }
 
     private static String classDotNameToType(String classDotName) {
         return "L" + classDotName.replace('.', '/') + ";";
@@ -593,7 +432,6 @@ public class ApkProtect {
     public static class Builder {
         private final ApkFolders apkFolders;
         private InstructionRewriter instructionRewriter;
-        private ApkVerifyCodeGenerator apkVerifyCodeGenerator;
         private ClassAndMethodFilter filter;
         private ClassAnalyzer classAnalyzer;
 
@@ -607,10 +445,6 @@ public class ApkProtect {
             return this;
         }
 
-        public Builder setApkVerifyCodeGenerator(ApkVerifyCodeGenerator apkVerifyCodeGenerator) {
-            this.apkVerifyCodeGenerator = apkVerifyCodeGenerator;
-            return this;
-        }
 
         public Builder setFilter(ClassAndMethodFilter filter) {
             this.filter = filter;
@@ -629,7 +463,7 @@ public class ApkProtect {
             if (classAnalyzer == null) {
                 throw new RuntimeException("classAnalyzer==null");
             }
-            return new ApkProtect(apkFolders, instructionRewriter, apkVerifyCodeGenerator, filter, classAnalyzer);
+            return new ApkProtect(apkFolders, instructionRewriter, filter, classAnalyzer);
         }
     }
 }

@@ -1,23 +1,23 @@
 package com.nmmedit.apkprotect.dex2c.converter.instructionrewriter;
 
+import com.android.tools.smali.dexlib2.Opcode;
+import com.android.tools.smali.dexlib2.Opcodes;
+import com.android.tools.smali.dexlib2.ReferenceType;
+import com.android.tools.smali.dexlib2.iface.ExceptionHandler;
+import com.android.tools.smali.dexlib2.iface.MethodImplementation;
+import com.android.tools.smali.dexlib2.iface.TryBlock;
+import com.android.tools.smali.dexlib2.iface.instruction.Instruction;
+import com.android.tools.smali.dexlib2.iface.instruction.ReferenceInstruction;
+import com.android.tools.smali.dexlib2.iface.instruction.SwitchElement;
+import com.android.tools.smali.dexlib2.iface.instruction.formats.*;
+import com.android.tools.smali.dexlib2.iface.reference.*;
+import com.android.tools.smali.dexlib2.writer.DexDataWriter;
+import com.android.tools.smali.util.ExceptionWithContext;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Ordering;
 import com.google.common.primitives.Ints;
 import com.nmmedit.apkprotect.dex2c.converter.ClassAnalyzer;
 import com.nmmedit.apkprotect.dex2c.converter.References;
-import org.jf.dexlib2.Opcode;
-import org.jf.dexlib2.Opcodes;
-import org.jf.dexlib2.ReferenceType;
-import org.jf.dexlib2.iface.ExceptionHandler;
-import org.jf.dexlib2.iface.MethodImplementation;
-import org.jf.dexlib2.iface.TryBlock;
-import org.jf.dexlib2.iface.instruction.Instruction;
-import org.jf.dexlib2.iface.instruction.ReferenceInstruction;
-import org.jf.dexlib2.iface.instruction.SwitchElement;
-import org.jf.dexlib2.iface.instruction.formats.*;
-import org.jf.dexlib2.iface.reference.*;
-import org.jf.dexlib2.writer.DexDataWriter;
-import org.jf.util.ExceptionWithContext;
 
 import javax.annotation.Nonnull;
 import java.io.ByteArrayOutputStream;
@@ -714,7 +714,7 @@ public abstract class InstructionRewriter {
             case SGET_CHAR:
             case SGET_SHORT:
             case SGET_WIDE:
-            case SGET_OBJECT:
+            case SGET_OBJECT: {
                 //修复接口中静态域访问问题
                 final FieldReference reference = (FieldReference) referenceInstruction.getReference();
                 final FieldReference newFieldRef = classAnalyzer.getDirectFieldRef(reference);
@@ -722,10 +722,12 @@ public abstract class InstructionRewriter {
                     return getReferenceIndex(referenceInstruction.getReferenceType(), newFieldRef);
                 }
                 break;
+            }
             case CONST_STRING:
-            case CONST_STRING_JUMBO:
-                //todo 直接从constStringPool中得到索引，这样生成c代码时可以去掉二分法
-                break;
+            case CONST_STRING_JUMBO: {
+                //重写const-string idx
+                return references.getConstStringItemIndex(((StringReference) referenceInstruction.getReference()).getString());
+            }
         }
         return getReferenceIndex(referenceInstruction.getReferenceType(),
                 referenceInstruction.getReference());

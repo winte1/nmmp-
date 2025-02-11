@@ -1,15 +1,15 @@
 package com.nmmedit.apkprotect.dex2c.converter.structs;
 
+import com.android.tools.smali.dexlib2.AccessFlags;
+import com.android.tools.smali.dexlib2.HiddenApiRestriction;
+import com.android.tools.smali.dexlib2.Opcode;
+import com.android.tools.smali.dexlib2.base.reference.BaseMethodReference;
+import com.android.tools.smali.dexlib2.base.reference.BaseTypeReference;
+import com.android.tools.smali.dexlib2.builder.BuilderInstruction;
+import com.android.tools.smali.dexlib2.builder.MutableMethodImplementation;
+import com.android.tools.smali.dexlib2.builder.instruction.*;
+import com.android.tools.smali.dexlib2.iface.*;
 import com.google.common.collect.Iterables;
-import org.jf.dexlib2.AccessFlags;
-import org.jf.dexlib2.HiddenApiRestriction;
-import org.jf.dexlib2.Opcode;
-import org.jf.dexlib2.base.reference.BaseMethodReference;
-import org.jf.dexlib2.base.reference.BaseTypeReference;
-import org.jf.dexlib2.builder.BuilderInstruction;
-import org.jf.dexlib2.builder.MutableMethodImplementation;
-import org.jf.dexlib2.builder.instruction.*;
-import org.jf.dexlib2.iface.*;
 
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
@@ -101,7 +101,10 @@ public class RegisterNativesCallerClassDef extends BaseTypeReference implements 
         final List<Method> methods = new ArrayList<>();
         boolean handled = false;
         for (Method directMethod : directMethods) {
-            if (directMethod.getName().equals(CLINIT_METHOD)) {
+            if (directMethod.getName().equals(CLINIT_METHOD)
+                    && directMethod.getParameters().isEmpty()
+                    && "V".equals(directMethod.getReturnType())
+            ) {//保证是static <clinit>()V方法. #82
                 methods.add(new RegisterNativesStaticBlock(directMethod));
                 handled = true;
             } else {
@@ -195,17 +198,17 @@ public class RegisterNativesCallerClassDef extends BaseTypeReference implements 
         @Override
         public MethodImplementation getImplementation() {
             if (method == null) {
-                final MutableMethodImplementation implementation = new MutableMethodImplementation(1);
+                final MutableMethodImplementation newImpl = new MutableMethodImplementation(1);
                 final List<BuilderInstruction> insns = getCallRegisterNativesMethod();
                 for (BuilderInstruction insn : insns) {
-                    implementation.addInstruction(insn);
+                    newImpl.addInstruction(insn);
                 }
 
-                implementation.addInstruction(new BuilderInstruction10x(Opcode.RETURN_VOID));
-                return implementation;
+                newImpl.addInstruction(new BuilderInstruction10x(Opcode.RETURN_VOID));
+                return newImpl;
             } else {
                 final MethodImplementation implementation = method.getImplementation();
-                if (implementation == null) {
+                if (implementation == null) {//无方法体static{},肯定出错不用考虑后续
                     throw new RuntimeException("static block methodImpl == null");
                 }
                 final MutableMethodImplementation newImpl = new MutableMethodImplementation(implementation) {

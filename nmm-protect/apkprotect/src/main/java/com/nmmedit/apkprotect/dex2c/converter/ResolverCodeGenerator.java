@@ -1,17 +1,16 @@
 package com.nmmedit.apkprotect.dex2c.converter;
 
+import com.android.tools.smali.dexlib2.dexbacked.DexBackedDexFile;
+import com.android.tools.smali.dexlib2.iface.reference.FieldReference;
+import com.android.tools.smali.dexlib2.iface.reference.MethodReference;
+import com.android.tools.smali.dexlib2.util.MethodUtil;
 import com.nmmedit.apkprotect.util.ModifiedUtf8;
-import org.jf.dexlib2.dexbacked.DexBackedDexFile;
-import org.jf.dexlib2.iface.reference.FieldReference;
-import org.jf.dexlib2.iface.reference.MethodReference;
-import org.jf.dexlib2.util.MethodUtil;
 
 import javax.annotation.Nonnull;
 import java.io.IOException;
 import java.io.UTFDataFormatException;
 import java.io.Writer;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.List;
 
 /**
@@ -59,26 +58,36 @@ public class ResolverCodeGenerator {
     //产生const-string*指令对应的缓存
     private void generateStringConstants(Writer writer) throws IOException {
         final References references = this.references;
-        final List<String> constantStrings = references.getConstantStringPool();
-        final int[] constIds = new int[constantStrings.size()];
-        int idx = 0;
-        for (String str : constantStrings) {
-            constIds[idx++] = references.getStringItemIndex(str);
-        }
-        //排序, 运行时以二分法查找
-        Arrays.sort(constIds);
+        final List<String> constantStringPool = references.getConstantStringPool();
 
-        writer.write("static const u4 gStringConstantIds[] = {\n");
-        for (int offset : constIds) {
-            writer.write(String.format("    0x%04x,\n", offset));
+        final int[] constStringIds = new int[constantStringPool.size()];
+        for (int i = 0; i < constantStringPool.size(); i++) {
+            //把得到字符串索引
+            constStringIds[i] = references.getStringItemIndex(constantStringPool.get(i));
+        }
+
+        //
+        writer.write(
+                "\n//字符串常量索引缓存,const-string指令索引被重写，直接根据索引得到字符串索引，然后创建jstring\n" +
+                        "typedef struct {\n" +
+                        "    u4 idx;\n" +
+                        "} ConstStringId;\n"
+        );
+
+        writer.write("static const ConstStringId gStringConstantIds[] = {\n");
+        for (int offset : constStringIds) {
+            writer.write(String.format("    {.idx=0x%04x},\n", offset));
         }
         writer.write("};\n");
 
-        writer.write(String.format("static jstring gStringConstants[%d];\n\n", constIds.length));
+        writer.write(String.format("static jstring gStringConstants[%d];\n\n", constStringIds.length));
     }
 
     private void generateResolver(Writer writer) throws IOException {
         writer.write("static void resolver_init(JNIEnv *env) {\n" +
+                "    if(sizeof(gFields) == 0) return;\n" +
+                "    if(sizeof(gMethods) == 0) return;\n" +
+                "    if(sizeof(gStringConstants) == 0) return;\n" +
                 "    memset(gFields, 0, sizeof(gFields));\n" +
                 "    memset(gMethods, 0, sizeof(gMethods));\n" +
                 "    memset(gStringConstants, 0, sizeof(gStringConstants));\n" +
@@ -191,29 +200,26 @@ public class ResolverCodeGenerator {
                 "}\n" +
                 "\n" +
                 "static pthread_mutex_t str_mutex = PTHREAD_MUTEX_INITIALIZER;\n" +
-                "\n" +
+
                 "static jstring dvmConstantString(JNIEnv *env, u4 idx) {\n" +
                 "    //先查找索引位置是否存在缓存,不用频繁创建string对象\n" +
-                "    s4 i = binarySearch(gStringConstantIds, sizeof(gStringConstantIds) / sizeof(u4), idx);\n" +
-                "    if (i >= 0) {\n" +
-                "        if (gStringConstants[i] == NULL) {\n" +
-                "            pthread_mutex_lock(&str_mutex);\n" +
-                "            jstring str;\n" +
-                "            if (gStringConstants[i] == NULL) {\n" +
-                "                str = (*env)->NewStringUTF(env, STRING_BY_ID(idx));\n" +
-                "                gStringConstants[i] = (*env)->NewGlobalRef(env, str);\n" +
-                "            } else {\n" +
-                "                str = (*env)->NewLocalRef(env, gStringConstants[i]);\n" +
-                "            }\n" +
-                "            pthread_mutex_unlock(&str_mutex);\n" +
-                "\n" +
-                "            return str;\n" +
+                "    if (gStringConstants[idx] == NULL) {\n" +
+                "        pthread_mutex_lock(&str_mutex);\n" +
+                "        jstring str;\n" +
+                "        if (gStringConstants[idx] == NULL) {\n" +
+                "            str = (*env)->NewStringUTF(env, STRING_BY_ID(gStringConstantIds[idx].idx));\n" +
+                "            gStringConstants[idx] = (*env)->NewGlobalRef(env, str);\n" +
                 "        } else {\n" +
-                "            return (*env)->NewLocalRef(env, gStringConstants[i]);\n" +
+                "            str = (*env)->NewLocalRef(env, gStringConstants[idx]);\n" +
                 "        }\n" +
+                "        pthread_mutex_unlock(&str_mutex);\n" +
+                "\n" +
+                "        return str;\n" +
+                "    } else {\n" +
+                "        return (*env)->NewLocalRef(env, gStringConstants[idx]);\n" +
                 "    }\n" +
-                "    return (*env)->NewStringUTF(env, STRING_BY_ID(idx));\n" +
                 "}\n" +
+                "\n" +
                 "\n" +
                 "static const char *dvmResolveTypeUtf(JNIEnv *env, u4 idx) {\n" +
                 "    return STRING_BY_TYPE_ID(idx);\n" +
